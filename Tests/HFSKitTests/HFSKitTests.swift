@@ -653,6 +653,48 @@ import HFSCore
     }
 }
 
+@Test func copyOutDirectoryAndReimportPreservesTypeCreatorForDataOnlyAutoFile() async throws {
+    HFSKitSettings.verboseLoggingEnabled = false
+    let sourceVolume = try makeWritableVolume()
+    let tempDir = try makeTempDir()
+    let exportedDirectoryURL = tempDir.appendingPathComponent("TypeCreatorExport", isDirectory: true)
+    let blankImageURL = tempDir.appendingPathComponent("typecreator-roundtrip.hda")
+    let mountainURL = try mountainURL()
+
+    try sourceVolume.makeDirectory(path: ":TypeCreatorDir")
+    try sourceVolume.copyIn(hostPath: mountainURL, toHFSPath: ":TypeCreatorDir:PlainData", mode: .raw)
+    try sourceVolume.setTypeCreator(path: ":TypeCreatorDir:PlainData", fileType: "APPL", fileCreator: "TEST")
+
+    let original = try sourceVolume.attributes(of: ":TypeCreatorDir:PlainData")
+    #expect(original.dataForkSize > 0)
+    #expect(original.resourceForkSize == 0)
+    #expect(original.fileType == "APPL")
+    #expect(original.fileCreator == "TEST")
+
+    try sourceVolume.copyOutDirectory(
+        hfsPath: ":TypeCreatorDir",
+        toHostDirectory: exportedDirectoryURL,
+        mode: .auto
+    )
+
+    let exportedNames = try Set(FileManager.default.contentsOfDirectory(atPath: exportedDirectoryURL.path))
+    #expect(exportedNames.contains("PlainData.bin"))
+
+    try HFSVolume.createBlank(path: blankImageURL, size: 8 * 1024 * 1024, volumeName: "TypeCRT")
+    let importedVolume = try HFSVolume(path: blankImageURL, writable: true)
+    try importedVolume.copyInDirectory(
+        hostDirectory: exportedDirectoryURL,
+        toHFSPath: ":ImportedTypeCreatorDir",
+        mode: .auto
+    )
+
+    let imported = try importedVolume.attributes(of: ":ImportedTypeCreatorDir:PlainData")
+    #expect(imported.dataForkSize == original.dataForkSize)
+    #expect(imported.resourceForkSize == original.resourceForkSize)
+    #expect(imported.fileType == original.fileType)
+    #expect(imported.fileCreator == original.fileCreator)
+}
+
 @Test func copyInMacBinaryAsRaw() async throws {
     HFSKitSettings.verboseLoggingEnabled = false
     let volume = try makeWritableVolume()

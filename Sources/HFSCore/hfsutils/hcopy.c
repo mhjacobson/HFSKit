@@ -172,7 +172,13 @@ cpofunc automode_hfs(hfsvol *vol, const char *path)
 	  strcmp(ent.u.file.type, "ttro") == 0)
 	return cpo_text;
       else if (ent.u.file.rsize == 0)
-	return cpo_raw;
+	{
+	  if (strcmp(ent.u.file.type, "????") == 0 &&
+	      strcmp(ent.u.file.creator, "UNIX") == 0)
+	    return cpo_raw;
+
+	  return cpo_macb;
+	}
     }
 
   return cpo_macb;

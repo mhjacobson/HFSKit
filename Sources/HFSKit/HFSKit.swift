@@ -607,11 +607,8 @@ public final class HFSVolume {
             if entry.isDirectory {
                 try copyOutDirectory(hfsPath: entryHFSPath, toHostDirectory: entryHostURL, mode: mode)
             } else {
-                if recursiveCopyOutUsesDirectoryDestination(entry: entry, mode: mode) {
-                    try copyOut(hfsPath: entryHFSPath, toHostPath: hostDirectory, mode: mode)
-                } else {
-                    try copyOut(hfsPath: entryHFSPath, toHostPath: entryHostURL, mode: mode)
-                }
+                let export = recursiveCopyOutExport(entry: entry, baseURL: entryHostURL, requestedMode: mode)
+                try copyOut(hfsPath: entryHFSPath, toHostPath: export.destination, mode: export.mode)
             }
         }
     }
@@ -775,16 +772,29 @@ private func sanitizeHostPathComponent(_ name: String) -> String {
     return name
 }
 
-private func recursiveCopyOutUsesDirectoryDestination(entry: HFSFileInfo,
-                                                      mode: HFSVolume.CopyMode) -> Bool
+private func recursiveCopyOutExport(entry: HFSFileInfo,
+                                    baseURL: URL,
+                                    requestedMode: HFSVolume.CopyMode)
+    -> (destination: URL, mode: HFSVolume.CopyMode)
 {
-    switch mode {
+    switch requestedMode {
     case .auto:
-        return entry.resourceForkSize > 0
-    case .macBinary, .binHex:
-        return true
+        if entry.fileType == "TEXT" || entry.fileType == "ttro" {
+            return (baseURL, .text)
+        }
+        if entry.resourceForkSize > 0 ||
+            entry.fileType != "????" ||
+            entry.fileCreator != "UNIX"
+        {
+            return (baseURL.appendingPathExtension("bin"), .macBinary)
+        }
+        return (baseURL, .raw)
+    case .macBinary:
+        return (baseURL.appendingPathExtension("bin"), .macBinary)
+    case .binHex:
+        return (baseURL.appendingPathExtension("hqx"), .binHex)
     case .raw, .text:
-        return false
+        return (baseURL, requestedMode)
     }
 }
 
