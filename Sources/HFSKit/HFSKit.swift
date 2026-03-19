@@ -581,7 +581,14 @@ public final class HFSVolume {
             if resourceValues.isDirectory == true {
                 try ensureDirectoryExists(at: destPath)
             } else {
-                try copyIn(hostPath: item, toHFSPath: destPath, mode: mode)
+                if recursiveCopyInUsesDirectoryDestination(hostPath: item, mode: mode) {
+                    let parentPath = relComponents.dropLast().reduce(hfsPath) { current, component in
+                        joinHFSPath(current, component)
+                    }
+                    try copyIn(hostPath: item, toHFSPath: parentPath, mode: mode)
+                } else {
+                    try copyIn(hostPath: item, toHFSPath: destPath, mode: mode)
+                }
             }
         }
     }
@@ -600,7 +607,11 @@ public final class HFSVolume {
             if entry.isDirectory {
                 try copyOutDirectory(hfsPath: entryHFSPath, toHostDirectory: entryHostURL, mode: mode)
             } else {
-                try copyOut(hfsPath: entryHFSPath, toHostPath: entryHostURL, mode: mode)
+                if recursiveCopyOutUsesDirectoryDestination(entry: entry, mode: mode) {
+                    try copyOut(hfsPath: entryHFSPath, toHostPath: hostDirectory, mode: mode)
+                } else {
+                    try copyOut(hfsPath: entryHFSPath, toHostPath: entryHostURL, mode: mode)
+                }
             }
         }
     }
@@ -762,6 +773,33 @@ private func sanitizeHostPathComponent(_ name: String) -> String {
         return name.replacingOccurrences(of: "/", with: "-")
     }
     return name
+}
+
+private func recursiveCopyOutUsesDirectoryDestination(entry: HFSFileInfo,
+                                                      mode: HFSVolume.CopyMode) -> Bool
+{
+    switch mode {
+    case .auto:
+        return entry.resourceForkSize > 0
+    case .macBinary, .binHex:
+        return true
+    case .raw, .text:
+        return false
+    }
+}
+
+private func recursiveCopyInUsesDirectoryDestination(hostPath: URL,
+                                                     mode: HFSVolume.CopyMode) -> Bool
+{
+    switch mode {
+    case .auto:
+        let lowercasedName = hostPath.lastPathComponent.lowercased()
+        return lowercasedName.hasSuffix(".bin") || lowercasedName.hasSuffix(".hqx")
+    case .macBinary, .binHex:
+        return true
+    case .raw, .text:
+        return false
+    }
 }
 
 private func formatMessage(prefix: String,

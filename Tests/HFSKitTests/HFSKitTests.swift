@@ -32,24 +32,20 @@ import HFSCore
     #expect(attributes.isDirectory == false)
     #expect(attributes.fileType == "????")
     #expect(attributes.fileCreator == "UNIX")
-    guard let baseCreatedUTC = Calendar(identifier: .gregorian).date(
-        from: DateComponents(
-            timeZone: TimeZone(secondsFromGMT: 0),
-            year: 2026,
-            month: 1,
-            day: 31,
-            hour: 0,
-            minute: 25,
-            second: 57
-        )
-    ) else {
-        throw HFSError.invalidArgument("Failed to construct expected creation date")
-    }
-    let expectedCreated = baseCreatedUTC.addingTimeInterval(
-        -TimeInterval(TimeZone.current.secondsFromGMT(for: baseCreatedUTC))
+    let utcCalendar = Calendar(identifier: .gregorian)
+    let expectedComponents = DateComponents(
+        timeZone: TimeZone(secondsFromGMT: 0),
+        year: 2026,
+        month: 1,
+        day: 31,
+        hour: 4,
+        minute: 25,
+        second: 57
     )
-    #expect(attributes.created == expectedCreated)
-    #expect(attributes.modified == expectedCreated)
+    let expectedCreated = try #require(utcCalendar.date(from: expectedComponents))
+    let fields: Set<Calendar.Component> = [.year, .month, .day, .hour, .minute, .second]
+    #expect(utcCalendar.dateComponents(fields, from: attributes.created) == utcCalendar.dateComponents(fields, from: expectedCreated))
+    #expect(utcCalendar.dateComponents(fields, from: attributes.modified) == utcCalendar.dateComponents(fields, from: expectedCreated))
 
     let outputURL = tempDir.appendingPathComponent("Sample")
     let copyOutPaths = ["Sample", ":Sample"]
@@ -601,6 +597,62 @@ import HFSCore
     }
 }
 
+@Test func copyOutDirectoryAndReimportJourney1988PreservesForkSizes() async throws {
+    HFSKitSettings.verboseLoggingEnabled = false
+    let sourceImageURL = try test2ImageURL()
+    let sourceVolume = try HFSVolume(path: sourceImageURL, writable: false)
+    let tempDir = try makeTempDir()
+    let exportedDirectoryURL = tempDir.appendingPathComponent("Journey1988Export", isDirectory: true)
+    let blankImageURL = tempDir.appendingPathComponent("journey-roundtrip.hda")
+
+    let originalSnapshot = try snapshotSubtree(
+        in: sourceVolume,
+        at: ":The Journey (1988)"
+    )
+    #expect(
+        originalSnapshot.values.contains(where: {
+            !$0.isDirectory && $0.dataForkSize > 0 && $0.resourceForkSize > 0
+        })
+    )
+
+    try sourceVolume.copyOutDirectory(
+        hfsPath: ":The Journey (1988)",
+        toHostDirectory: exportedDirectoryURL,
+        mode: .auto
+    )
+    let exportedNames = try Set(FileManager.default.contentsOfDirectory(
+        atPath: exportedDirectoryURL.path
+    ))
+    #expect(exportedNames.contains("The_Journey.bin"))
+    #expect(exportedNames.contains(where: { $0.hasPrefix("Icon") && $0.hasSuffix(".bin") }))
+    #expect(!exportedNames.contains("The Journey"))
+    #expect(!exportedNames.contains(where: { $0 == "Icon" || $0 == "Icon " }))
+
+    try HFSVolume.createBlank(path: blankImageURL, size: 8 * 1024 * 1024, volumeName: "JourneyRT")
+    let importedVolume = try HFSVolume(path: blankImageURL, writable: true)
+    try importedVolume.copyInDirectory(
+        hostDirectory: exportedDirectoryURL,
+        toHFSPath: ":Journey1988",
+        mode: .auto
+    )
+
+    let importedSnapshot = try snapshotSubtree(
+        in: importedVolume,
+        at: ":Journey1988"
+    )
+
+    #expect(importedSnapshot.count == originalSnapshot.count)
+
+    for (relativePath, original) in originalSnapshot {
+        let imported = try #require(importedSnapshot[relativePath], "Missing path \(relativePath)")
+        #expect(imported.isDirectory == original.isDirectory, "Directory mismatch at \(relativePath)")
+        if !original.isDirectory {
+            #expect(imported.dataForkSize == original.dataForkSize, "Data fork mismatch at \(relativePath)")
+            #expect(imported.resourceForkSize == original.resourceForkSize, "Resource fork mismatch at \(relativePath)")
+        }
+    }
+}
+
 @Test func copyInMacBinaryAsRaw() async throws {
     HFSKitSettings.verboseLoggingEnabled = false
     let volume = try makeWritableVolume()
@@ -955,6 +1007,52 @@ private func test2ImageURL() throws -> URL {
         throw HFSError.invalidArgument("Missing test2 image resource")
     }
     return imgURL
+}
+
+private struct HFSTreeSnapshotEntry {
+    let isDirectory: Bool
+    let dataForkSize: Int
+    let resourceForkSize: Int
+}
+
+private func snapshotSubtree(in volume: HFSVolume,
+                             at rootPath: String,
+                             relativePath: String = "") throws -> [String: HFSTreeSnapshotEntry]
+{
+    let info = try volume.attributes(of: rootPath)
+    var snapshot: [String: HFSTreeSnapshotEntry] = [
+        relativePath: HFSTreeSnapshotEntry(
+            isDirectory: info.isDirectory,
+            dataForkSize: info.dataForkSize,
+            resourceForkSize: info.resourceForkSize
+        )
+    ]
+
+    guard info.isDirectory else {
+        return snapshot
+    }
+
+    for child in try volume.list(directory: rootPath).sorted(by: { $0.name < $1.name }) {
+        let childRelativePath = relativePath.isEmpty ? child.name : "\(relativePath)/\(child.name)"
+        let childHFSPath = joinHFSPathForTest(rootPath, child.name)
+        let childSnapshot = try snapshotSubtree(
+            in: volume,
+            at: childHFSPath,
+            relativePath: childRelativePath
+        )
+        for (key, value) in childSnapshot {
+            snapshot[key] = value
+        }
+    }
+
+    return snapshot
+}
+
+private func joinHFSPathForTest(_ base: String, _ component: String) -> String {
+    if base.isEmpty || base == ":" {
+        return ":\(component)"
+    }
+    return base.hasSuffix(":") ? "\(base)\(component)" : "\(base):\(component)"
 }
 
 private func multiImageURL() throws -> URL {
