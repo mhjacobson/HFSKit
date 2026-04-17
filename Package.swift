@@ -1,4 +1,4 @@
-// swift-tools-version: 6.1
+// swift-tools-version: 5.7
 import PackageDescription
 
 let package = Package(
@@ -29,7 +29,10 @@ let package = Package(
         .target(
             name: "HFSKit",
             dependencies: ["HFSCore"],
-            path: "Sources/HFSKit"
+            path: "Sources/HFSKit",
+            swiftSettings: [
+                .define("NEW_COPY")
+            ]
         ),
         .testTarget(
             name: "HFSKitTests",

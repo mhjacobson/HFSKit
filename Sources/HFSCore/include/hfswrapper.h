@@ -70,6 +70,10 @@ typedef struct {
 #define HFSW_COPY_MODE_BINH 3
 #define HFSW_COPY_MODE_TEXT 4
 
+/* HFS fork selectors for hfsw_read_fork/hfsw_write_fork. */
+#define HFSW_FORK_DATA      0
+#define HFSW_FORK_RESOURCE  1
+
 /* File information returned by hfsw_stat() and hfsw_list_dir() */
 typedef struct {
     char      name[256];    /* UTF-8-ish name, up to 255 bytes plus NUL */
@@ -218,6 +222,22 @@ HFSWError hfsw_copy_out(HFSImage *image,
                         const char *hostDestPath,
                         int mode);
 
+/* Read a fork of an HFS file.
+ * Caller must free the buffer on success.
+ */
+HFSWError hfsw_read_fork(HFSImage *image,
+                         const char *hfsPath,
+                         int forkKind,
+                         uint8_t **outBytes,
+                         uint32_t *outSize);
+
+/* Write a fork of an HFS file. */
+HFSWError hfsw_write_fork(HFSImage *image,
+                          const char *hfsPath,
+                          int forkKind,
+                          const uint8_t *bytes,
+                          uint32_t size);
+
 /* Set Mac file type and creator for an HFS file.
  * fileType/fileCreator: 4-character codes (e.g. "TEXT", "ttxt").
  * If shorter, will be padded with spaces; if longer, truncated.
@@ -226,6 +246,13 @@ HFSWError hfsw_set_type_creator(HFSImage *image,
                                 const char *hfsPath,
                                 const char *fileType,
                                 const char *fileCreator);
+
+/* Set Finder flags and create/modify timestamps for an HFS file. */
+HFSWError hfsw_set_finder_info(HFSImage *image,
+                               const char *hfsPath,
+                               uint16_t finderFlags,
+                               int64_t created,
+                               int64_t modified);
 
 /* Set the volume blessed folder to the directory at hfsPath. */
 HFSWError hfsw_set_blessed(HFSImage *image,

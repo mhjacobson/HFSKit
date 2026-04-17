@@ -917,6 +917,135 @@ hfsw_copy_out(HFSImage *image,
 }
 
 HFSWError
+hfsw_read_fork(HFSImage *image,
+               const char *hfsPath,
+               int forkKind,
+               uint8_t **outBytes,
+               uint32_t *outSize)
+{
+    if (!image || !image->vol || !hfsPath || !outBytes || !outSize) {
+        errno = EINVAL;
+        return hfsw_err(NULL);
+    }
+
+    if (forkKind != HFSW_FORK_DATA && forkKind != HFSW_FORK_RESOURCE) {
+        errno = EINVAL;
+        return hfsw_err("invalid fork kind");
+    }
+
+    *outBytes = NULL;
+    *outSize = 0;
+
+    hfsfile *const file = hfs_open(image->vol, hfsPath);
+    if (!file) {
+        return hfsw_err(hfs_error);
+    }
+
+    if (hfs_setfork(file, forkKind) != 0) {
+        hfs_close(file);
+        return hfsw_err(hfs_error);
+    }
+
+    hfsdirent ent;
+    if (hfs_fstat(file, &ent) != 0) {
+        hfs_close(file);
+        return hfsw_err(hfs_error);
+    }
+
+    const unsigned long expected = (forkKind == HFSW_FORK_RESOURCE) ? ent.u.file.rsize : ent.u.file.dsize;
+    if (expected == 0) {
+        hfs_close(file);
+        return hfsw_ok();
+    }
+
+    uint8_t *const buffer = malloc(expected);
+    if (!buffer) {
+        hfs_close(file);
+        errno = ENOMEM;
+        return hfsw_err(NULL);
+    }
+
+    unsigned long offset = 0;
+    while (offset < expected) {
+        const unsigned long got = hfs_read(file, buffer + offset, expected - offset);
+        if (got == 0) {
+            free(buffer);
+            hfs_close(file);
+            errno = EIO;
+            return hfsw_err("error reading HFS fork");
+        }
+        offset += got;
+    }
+
+    if (hfs_close(file) != 0) {
+        free(buffer);
+        return hfsw_err(hfs_error);
+    }
+
+    *outBytes = buffer;
+    *outSize = (uint32_t)expected;
+    return hfsw_ok();
+}
+
+HFSWError
+hfsw_write_fork(HFSImage *image,
+                const char *hfsPath,
+                int forkKind,
+                const uint8_t *bytes,
+                uint32_t size)
+{
+    if (!image || !image->vol || !hfsPath) {
+        errno = EINVAL;
+        return hfsw_err(NULL);
+    }
+
+    if (size > 0 && !bytes) {
+        errno = EINVAL;
+        return hfsw_err(NULL);
+    }
+
+    if (forkKind != HFSW_FORK_DATA && forkKind != HFSW_FORK_RESOURCE) {
+        errno = EINVAL;
+        return hfsw_err("invalid fork kind");
+    }
+
+    hfsfile *file = hfs_open(image->vol, hfsPath);
+    if (!file && errno == ENOENT) {
+        file = hfs_create(image->vol, hfsPath, "????", "UNIX");
+    }
+    if (!file) {
+        return hfsw_err(hfs_error);
+    }
+
+    if (hfs_setfork(file, forkKind) != 0) {
+        hfs_close(file);
+        return hfsw_err(hfs_error);
+    }
+
+    if (hfs_truncate(file, 0) != 0) {
+        hfs_close(file);
+        return hfsw_err(hfs_error);
+    }
+
+    unsigned long offset = 0;
+    while (offset < (unsigned long)size) {
+        const unsigned long wrote = hfs_write(file, bytes + offset, (unsigned long)size - offset);
+        if (wrote == 0) {
+            hfs_close(file);
+            errno = EIO;
+            return hfsw_err("error writing HFS fork");
+        }
+        offset += wrote;
+    }
+
+    if (hfs_close(file) != 0) {
+        return hfsw_err(hfs_error);
+    }
+
+    return hfsw_ok();
+}
+
+HFSWError
 hfsw_set_type_creator(HFSImage *image,
                       const char *hfsPath,
                       const char *fileType,
@@ -934,6 +1063,34 @@ hfsw_set_type_creator(HFSImage *image,
 
     normalize_fourcc(fileType,   ent.u.file.type);
     normalize_fourcc(fileCreator, ent.u.file.creator);
+
+    if (hfs_setattr(image->vol, (char *)hfsPath, &ent) != 0) {
+        return hfsw_err(hfs_error);
+    }
+
+    return hfsw_ok();
+}
+
+HFSWError
+hfsw_set_finder_info(HFSImage *image,
+                     const char *hfsPath,
+                     uint16_t finderFlags,
+                     int64_t created,
+                     int64_t modified)
+{
+    if (!image || !image->vol || !hfsPath) {
+        errno = EINVAL;
+        return hfsw_err(NULL);
+    }
+
+    hfsdirent ent;
+    if (hfs_stat(image->vol, (char *)hfsPath, &ent) != 0) {
+        return hfsw_err(hfs_error);
+    }
+
+    ent.fdflags = finderFlags;
+    ent.crdate = (time_t)created;
+    ent.mddate = (time_t)modified;
 
     if (hfs_setattr(image->vol, (char *)hfsPath, &ent) != 0) {
         return hfsw_err(hfs_error);

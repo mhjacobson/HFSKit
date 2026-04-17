@@ -495,12 +495,88 @@ public final class HFSVolume {
         case text = 4
     }
 
+    private enum ForkKind: Int32 {
+        case data = 0
+        case resource = 1
+    }
+
     public func copyIn(hostPath: URL,
                        toHFSPath hfsPath: String,
                        mode: CopyMode = .auto) throws
     {
-        let h = try requireHandle()
+#if NEW_COPY
+        let effectiveMode: CopyMode
+        if mode == .auto {
+            let lowercasedName = hostPath.lastPathComponent.lowercased()
+            if lowercasedName.hasSuffix(".bin") {
+                effectiveMode = .macBinary
+            } else if lowercasedName.hasSuffix(".hqx") {
+                effectiveMode = .binHex
+            } else {
+                effectiveMode = .raw
+            }
+        } else {
+            effectiveMode = mode
+        }
 
+        let destinationName: String
+        let dataForkData: Data
+        let resourceForkData: Data
+        let fileType: String
+        let fileCreator: String
+        var finderFlags: UInt16?
+        var created: Date?
+        var modified: Date?
+
+        switch effectiveMode {
+        case .raw:
+            destinationName = rawCopyInDestinationHint(from: hostPath)
+            dataForkData = try Data(contentsOf: hostPath, options: .mappedIfSafe)
+            resourceForkData = try readHostResourceFork(hostPath: hostPath)
+            let hostTypeCreator = try readHostTypeCreator(hostPath: hostPath)
+            fileType = hostTypeCreator.type
+            fileCreator = hostTypeCreator.creator
+        case .text:
+            destinationName = textCopyInDestinationHint(from: hostPath)
+            let hostData = try Data(contentsOf: hostPath, options: .mappedIfSafe)
+            dataForkData = try hostTextDataToHFSTextData(hostData)
+            resourceForkData = Data()
+            fileType = "TEXT"
+            fileCreator = "UNIX"
+        case .macBinary:
+            let encoded = try Data(contentsOf: hostPath, options: .mappedIfSafe)
+            let decoded = try MacBinary.decode(encoded)
+            destinationName = decoded.name
+            dataForkData = decoded.dataFork
+            resourceForkData = decoded.resourceFork
+            fileType = decoded.fileType
+            fileCreator = decoded.fileCreator
+            finderFlags = decoded.finderFlags
+            created = decoded.created
+            modified = decoded.modified
+        case .binHex:
+            throw HFSError.invalidArgument("BinHex mode is not supported when NEW_COPY is enabled.")
+        case .auto:
+            fatalError("unreachable copyIn mode in this branch")
+        }
+
+        let destinationHFSPath = try resolvedCopyInDestinationPath(stat: { try self.stat(path: $0) },
+                                                                   requestedHFSPath: hfsPath,
+                                                                   destinationName: destinationName)
+
+        try writeFork(path: destinationHFSPath, fork: .data, data: dataForkData)
+        try writeFork(path: destinationHFSPath, fork: .resource, data: resourceForkData)
+        try setTypeCreator(path: destinationHFSPath,
+                           fileType: fileType,
+                           fileCreator: fileCreator)
+        if let finderFlags, let created, let modified {
+            try setFinderInfo(path: destinationHFSPath,
+                              finderFlags: finderFlags,
+                              created: created,
+                              modified: modified)
+        }
+#else
+        let h = try requireHandle()
         let error = try hostPath.path.withCString { cHost in
             try withHFSPathCString(hfsPath) { cHFS in
                 hfsw_copy_in(h, cHost, cHFS, mode.rawValue)
@@ -513,6 +589,7 @@ public final class HFSVolume {
             path: hfsPath,
             destination: hostPath.path
         )
+#endif
     }
 
     public func copyIn(hostPath: URL,
@@ -526,6 +603,44 @@ public final class HFSVolume {
                         toHostPath hostPath: URL,
                         mode: CopyMode = .auto) throws
     {
+#if NEW_COPY
+        let effectiveMode: CopyMode
+        if mode == .auto {
+            effectiveMode = .raw
+        } else {
+            effectiveMode = mode
+        }
+        let info = try stat(path: hfsPath)
+        let dataForkData = try readFork(path: hfsPath, fork: .data)
+        let resourceForkData = try readFork(path: hfsPath, fork: .resource)
+
+        switch effectiveMode {
+        case .raw:
+            let destinationURL = resolvedRawCopyOutDestinationPath(info: info, hostPath: hostPath)
+            try dataForkData.write(to: destinationURL, options: [])
+            try writeHostResourceFork(data: resourceForkData, hostPath: destinationURL)
+            try writeHostTypeCreator(fileType: info.fileType,
+                                     fileCreator: info.fileCreator,
+                                     hostPath: destinationURL)
+            return
+        case .text:
+            let destinationURL = resolvedTextCopyOutDestinationPath(info: info, hfsPath: hfsPath, hostPath: hostPath)
+            let hostTextData = try hfsTextDataToHostTextData(dataForkData)
+            try hostTextData.write(to: destinationURL, options: [])
+            return
+        case .macBinary:
+            let destinationPath = MacBinary.resolvedCopyOutDestinationPath(info: info, hostURL: hostPath)
+            let encoded = try MacBinary.encode(info: info,
+                                               dataFork: dataForkData,
+                                               resourceFork: resourceForkData)
+            try encoded.write(to: destinationPath, options: [])
+            return
+        case .binHex:
+            throw HFSError.invalidArgument("BinHex mode is not supported when NEW_COPY is enabled.")
+        case .auto:
+            fatalError("unreachable copyOut mode in this branch")
+        }
+#else
         let h = try requireHandle()
 
         let error = try withHFSPathCString(hfsPath) { cHFS in
@@ -540,6 +655,7 @@ public final class HFSVolume {
             path: hfsPath,
             destination: hostPath.path
         )
+#endif
     }
 
     public func copyOut(hfsPath info: HFSFileInfo,
@@ -607,8 +723,12 @@ public final class HFSVolume {
             if entry.isDirectory {
                 try copyOutDirectory(hfsPath: entryHFSPath, toHostDirectory: entryHostURL, mode: mode)
             } else {
+#if NEW_COPY
+                try copyOut(hfsPath: entryHFSPath, toHostPath: entryHostURL, mode: mode)
+#else
                 let export = recursiveCopyOutExport(entry: entry, baseURL: entryHostURL, requestedMode: mode)
                 try copyOut(hfsPath: entryHFSPath, toHostPath: export.destination, mode: export.mode)
+#endif
             }
         }
     }
@@ -653,6 +773,22 @@ public final class HFSVolume {
         try setBlessed(path: info.path)
     }
 
+    public func setFinderInfo(path: String,
+                              finderFlags: UInt16,
+                              created: Date,
+                              modified: Date) throws
+    {
+        let h = try requireHandle()
+        let createdSeconds = Int64(created.timeIntervalSince1970)
+        let modifiedSeconds = Int64(modified.timeIntervalSince1970)
+
+        let error = try withHFSPathCString(path) { cPath in
+            hfsw_set_finder_info(h, cPath, finderFlags, createdSeconds, modifiedSeconds)
+        }
+
+        try throwIfError(error, operation: "set finder info", path: path)
+    }
+
     // MARK: - Directory delete
 
     public func deleteDirectory(path: String) throws {
@@ -684,6 +820,36 @@ public final class HFSVolume {
             try makeDirectory(path: hfsPath)
         }
     }
+
+    private func readFork(path: String, fork: ForkKind) throws -> Data {
+        let h = try requireHandle()
+        var bytes: UnsafeMutablePointer<UInt8>?
+        var size: UInt32 = 0
+
+        let error = try withHFSPathCString(path) { cPath in
+            hfsw_read_fork(h, cPath, fork.rawValue, &bytes, &size)
+        }
+        let operation = (fork == .resource) ? "read resource fork" : "read data fork"
+        try throwIfError(error, operation: operation, path: path)
+
+        guard let bytes, size > 0 else { return Data() }
+        let result = Data(bytes: bytes, count: Int(size))
+        free(UnsafeMutableRawPointer(bytes))
+        return result
+    }
+
+    private func writeFork(path: String, fork: ForkKind, data: Data) throws {
+        let h = try requireHandle()
+        let error = try withHFSPathCString(path) { cPath in
+            data.withUnsafeBytes { rawBuffer in
+                let baseAddress = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                return hfsw_write_fork(h, cPath, fork.rawValue, baseAddress, UInt32(data.count))
+            }
+        }
+        let operation = (fork == .resource) ? "write resource fork" : "write data fork"
+        try throwIfError(error, operation: operation, path: path)
+    }
+
 }
 
 // MARK: - Internal conversion
